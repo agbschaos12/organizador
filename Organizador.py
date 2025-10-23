@@ -1,6 +1,4 @@
 # Organizador.py
-# Versão unificada: contém tanto a lógica de manipulação de arquivos (file_ops) quanto a interface GUI.
-# Coloque este arquivo em uma pasta e execute com: python Organizador.py
 # Dependências opcionais:
 #  - customtkinter (recomendado para aparência)
 #  - tkcalendar (opcional para calendário visual)
@@ -28,7 +26,7 @@ try:
 except Exception:
     HAS_TKCALENDAR = False
 
-# ------------------- file_ops (integrado) -------------------
+# ------------------- file ops -------------------
 LOGFILE = "organizer.log"
 UNDO_FILE = "undo_record.json"
 
@@ -912,4 +910,5 @@ class App(customtkinter.CTk):
 
 if __name__ == "__main__":
     app = App()
+
     app.mainloop()
