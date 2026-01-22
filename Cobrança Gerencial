@@ -1,0 +1,369 @@
+# -*- coding: utf-8 -*-
+"""
+Cobrança Gerencial
+Interface em customtkinter para importar CSV, agrupar por cliente
+e exportar o resultado em CSV (pt-BR) e XLSX.
+Salvar como: cobranca_gerencial.py
+Requer: pip install customtkinter
+Para exportar .xlsx também: pip install openpyxl
+"""
+
+import csv
+import re
+from datetime import datetime
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+try:
+    import customtkinter as ctk
+except Exception as e:
+    print("Erro ao importar customtkinter. Instale com: pip install customtkinter")
+    raise
+
+# tentar importar openpyxl (opcional)
+try:
+    from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
+    from openpyxl.styles import numbers
+    OPENPYXL_AVAILABLE = True
+except Exception:
+    OPENPYXL_AVAILABLE = False
+
+APP_TITLE = "Cobrança Gerencial"
+
+DATE_FORMATS = ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%d/%m/%y"]
+
+
+def try_parse_date(s):
+    s = (s or "").strip()
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def parse_float_brazilian(value_str):
+    if value_str is None:
+        raise ValueError("None")
+    s = str(value_str).strip()
+    if s == "":
+        raise ValueError("vazio")
+    is_negative = False
+    if s.startswith("(") and s.endswith(")"):
+        is_negative = True
+        s = s[1:-1].strip()
+    s = s.replace("\xa0", "").replace(" ", "")
+    s = re.sub(r"[^\d\.,\-]", "", s)
+    if s == "" or s in ("-", ",", "."):
+        raise ValueError("não é número")
+    if "." in s and "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        if s.count(".") > 1:
+            s = s.replace(".", "")
+        s = s.replace(",", ".")
+    try:
+        val = float(s)
+    except Exception as e:
+        raise ValueError(f"fail parse '{value_str}' -> '{s}'") from e
+    if is_negative:
+        val = -val
+    return val
+
+
+def parse_parcela(parcela_text):
+    if parcela_text is None:
+        return None
+    txt = str(parcela_text).strip()
+    if "/" not in txt:
+        return None
+    a, b = txt.split("/", 1)
+    try:
+        return int(a), int(b)
+    except Exception:
+        return None
+
+
+class CobrancaGerencialApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP_TITLE)
+        self.geometry("1000x650")
+        ctk.set_appearance_mode("system")
+        ctk.set_default_color_theme("blue")
+
+        self.imported_data = []
+        self.report_data = []
+
+        self._build_screen1()
+
+    def _clear(self):
+        for w in self.winfo_children():
+            w.destroy()
+
+    def _build_screen1(self):
+        self._clear()
+        frame = ctk.CTkFrame(self, corner_radius=8)
+        frame.pack(expand=True, fill="both", padx=30, pady=30)
+
+        title = ctk.CTkLabel(frame, text=APP_TITLE, font=ctk.CTkFont(size=30, weight="bold"))
+        title.pack(pady=(16, 8))
+
+        info = ctk.CTkLabel(frame, text="Importe um CSV com colunas:\ncliente, vencimento, nf-e, parcela, valor", justify="center")
+        info.pack(pady=(0, 18))
+
+        btn_import = ctk.CTkButton(frame, text="Importar Planilha", width=240, height=44, command=self._action_import_csv)
+        btn_import.pack(pady=12)
+
+        self.status_label = ctk.CTkLabel(frame, text="Nenhum arquivo importado")
+        self.status_label.pack(pady=(12, 4))
+
+        goto_btn = ctk.CTkButton(frame, text="Ir para Resultado", width=200, command=self._build_screen2)
+        goto_btn.pack(pady=(6, 0))
+
+        obs = ctk.CTkLabel(frame, text="Observação: cabeçalhos são lidos case-insensitive.", fg_color=None)
+        obs.pack(pady=(10, 0))
+
+        self._update_status()
+
+    def _action_import_csv(self):
+        path = filedialog.askopenfilename(title="Selecione CSV", filetypes=[("CSV files", "*.csv"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                if not reader.fieldnames:
+                    messagebox.showerror("Erro", "CSV sem cabeçalho válido.")
+                    return
+                headers = [h.strip().lower() for h in reader.fieldnames]
+                expected = {"cliente", "vencimento", "nf-e", "parcela", "valor"}
+                if not expected.issubset(set(headers)):
+                    messagebox.showerror("Erro", f"CSV deve conter colunas: cliente, vencimento, nf-e, parcela, valor\nCabeçalhos encontrados: {headers}")
+                    return
+                self.imported_data = []
+                for row in reader:
+                    normalized = {k.strip().lower(): (v.strip() if v is not None else "") for k, v in row.items()}
+                    entry = {
+                        "cliente": normalized.get("cliente", ""),
+                        "vencimento": normalized.get("vencimento", ""),
+                        "nf-e": normalized.get("nf-e", ""),
+                        "parcela": normalized.get("parcela", ""),
+                        "valor": normalized.get("valor", "")
+                    }
+                    self.imported_data.append(entry)
+        except Exception as e:
+            messagebox.showerror("Erro ao ler CSV", str(e))
+            return
+
+        try:
+            invalid_count = self._build_report_from_imported()
+        except Exception as e:
+            messagebox.showerror("Erro ao processar dados", str(e))
+            return
+
+        msg = f"Importado com sucesso: {len(self.imported_data)} linhas.\nRelatório com {len(self.report_data)} clientes."
+        if invalid_count:
+            msg += f"\nForam ignorados {invalid_count} valores inválidos na coluna 'valor'."
+        messagebox.showinfo("Importação concluída", msg)
+        self._update_status()
+        self._build_screen2()
+
+    def _build_report_from_imported(self):
+        groups = {}
+        order = []
+        for row in self.imported_data:
+            chave = row["cliente"]
+            if chave not in groups:
+                groups[chave] = []
+                order.append(chave)
+            groups[chave].append(row)
+
+        report = []
+        invalid_value_count = 0
+        for cliente in order:
+            rows = groups[cliente]
+            parsed = [(try_parse_date(r["vencimento"]), r["vencimento"]) for r in rows]
+            valid_dates = [dt for dt, raw in parsed if dt is not None]
+            if valid_dates:
+                earliest = min(valid_dates)
+                vencimento_final = earliest.strftime("%d/%m/%Y")
+            else:
+                vencimento_final = min([raw for dt, raw in parsed])
+            nfe_values = [r["nf-e"] for r in rows]
+            all_equal_nfe = all(x == nfe_values[0] for x in nfe_values)
+            nf_e_final = nfe_values[0] if all_equal_nfe else "Geral"
+            if not all_equal_nfe:
+                parcela_final = "-"
+            else:
+                parsed_parc = [parse_parcela(r["parcela"]) for r in rows]
+                nums = [p[0] for p in parsed_parc if p is not None]
+                if not nums:
+                    parcela_final = "-"
+                else:
+                    parcela_final = f"{min(nums)}/{max(nums)}"
+            total = 0.0
+            for r in rows:
+                try:
+                    v = parse_float_brazilian(r["valor"])
+                    total += v
+                except Exception:
+                    invalid_value_count += 1
+                    continue
+            report.append({
+                "cliente": cliente,
+                "vencimento": vencimento_final,
+                "nf-e": nf_e_final,
+                "parcela": parcela_final,
+                "valor": float(total)
+            })
+        self.report_data = report
+        return invalid_value_count
+
+    def _build_screen2(self):
+        self._clear()
+        top = ctk.CTkFrame(self)
+        top.pack(fill="x", padx=10, pady=8)
+
+        back_btn = ctk.CTkButton(top, text="← Voltar", width=90, command=self._build_screen1)
+        back_btn.pack(side="left", padx=(4, 10))
+
+        title = ctk.CTkLabel(top, text="Resultado (pré-visualização)", font=ctk.CTkFont(size=18))
+        title.pack(side="left")
+
+        center = ctk.CTkFrame(self)
+        center.pack(fill="both", expand=True, padx=12, pady=10)
+
+        columns = ("cliente", "vencimento", "nf-e", "parcela", "valor")
+        self.tree = ttk.Treeview(center, columns=columns, show="headings")
+        for col in columns:
+            self.tree.heading(col, text=col.capitalize())
+            if col == "cliente":
+                self.tree.column(col, width=420, anchor="w")
+            elif col == "valor":
+                self.tree.column(col, width=120, anchor="e")
+            else:
+                self.tree.column(col, width=140, anchor="center")
+
+        vsb = ttk.Scrollbar(center, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(center, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.pack(side="top", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+
+        self._populate_treeview()
+
+        footer = ctk.CTkFrame(self)
+        footer.pack(fill="x", padx=12, pady=8)
+
+        export_btn = ctk.CTkButton(footer, text="Exportar Planilha", width=200, command=self._action_export_sheet)
+        export_btn.pack(side="right", padx=8)
+
+        reimport_btn = ctk.CTkButton(footer, text="Importar Outro CSV", width=200, command=self._action_import_csv)
+        reimport_btn.pack(side="right", padx=8)
+
+        info_text = f"{len(self.report_data)} clientes na visualização."
+        self.result_status = ctk.CTkLabel(footer, text=info_text)
+        self.result_status.pack(side="left")
+
+    def _populate_treeview(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        if not self.report_data:
+            return
+        for row in self.report_data:
+            valor_display = f"{row['valor']:.2f}".replace(".", ",")
+            self.tree.insert("", "end", values=(row["cliente"], row["vencimento"], row["nf-e"], row["parcela"], valor_display))
+
+    def _action_export_sheet(self):
+        if not self.report_data:
+            messagebox.showwarning("Nada para exportar", "Não há dados processados para exportar. Importe um CSV primeiro.")
+            return
+
+        fpath = filedialog.asksaveasfilename(
+            title="Salvar como",
+            defaultextension=".csv",
+            filetypes=[("Excel Workbook (*.xlsx)", "*.xlsx"), ("CSV pt-BR (*.csv)", "*.csv"), ("All files", "*.*")]
+        )
+        if not fpath:
+            return
+
+        fpath_lower = fpath.lower()
+        try:
+            if fpath_lower.endswith(".xlsx"):
+                # export xlsx via openpyxl
+                if not OPENPYXL_AVAILABLE:
+                    messagebox.showerror("openpyxl não instalado", "Para exportar .xlsx instale openpyxl:\n\npip install openpyxl")
+                    return
+                self._export_xlsx(fpath)
+            else:
+                # tratar como CSV pt-BR (delimitador ;)
+                self._export_csv_ptbr(fpath)
+        except Exception as e:
+            messagebox.showerror("Erro ao exportar", str(e))
+            return
+
+        messagebox.showinfo("Exportado", f"Arquivo salvo em:\n{fpath}")
+
+    def _export_csv_ptbr(self, path):
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f, delimiter=';')
+            writer.writerow(["cliente", "vencimento", "nf-e", "parcela", "valor"])
+            for r in self.report_data:
+                valor_str = f"{r['valor']:.2f}".replace(".", ",")
+                writer.writerow([r["cliente"], r["vencimento"], r["nf-e"], r["parcela"], valor_str])
+
+    def _export_xlsx(self, path):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Relatório"
+
+        headers = ["cliente", "vencimento", "nf-e", "parcela", "valor"]
+        ws.append(headers)
+
+        # escrever linhas - valor como float
+        for r in self.report_data:
+            ws.append([r["cliente"], r["vencimento"], r["nf-e"], r["parcela"], r["valor"]])
+
+        # ajustar largura colunas e formatar coluna 'valor' como número com 2 decimais
+        # localizar índice da coluna valor (1-based)
+        col_idx = headers.index("valor") + 1
+        for col_i, header in enumerate(headers, start=1):
+            max_len = len(header)
+            for cell in ws[get_column_letter(col_i)]:
+                if cell.value is None:
+                    continue
+                s = str(cell.value)
+                if len(s) > max_len:
+                    max_len = len(s)
+            # ajustar largura (um multiplicador simples)
+            ws.column_dimensions[get_column_letter(col_i)].width = min(max_len * 1.2, 60)
+
+        # aplicar formatação numérica para 'valor'
+        # usar formato '#,##0.00' — a exibição final depende do locale do Excel do usuário
+        num_fmt = '#,##0.00'
+        for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+            for cell in row:
+                # se o valor não for numérico por algum motivo, pular
+                try:
+                    if cell.value is not None:
+                        cell.value = float(cell.value)
+                        cell.number_format = num_fmt
+                except Exception:
+                    pass
+
+        wb.save(path)
+
+    def _update_status(self):
+        if self.imported_data:
+            self.status_label.configure(text=f"{len(self.imported_data)} linhas importadas — relatório com {len(self.report_data)} clientes.")
+        else:
+            self.status_label.configure(text="Nenhum arquivo importado")
+
+
+if __name__ == "__main__":
+    app = CobrancaGerencialApp()
+    app.mainloop()
