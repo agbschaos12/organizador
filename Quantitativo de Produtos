@@ -1,0 +1,283 @@
+# -*- coding: utf-8 -*-
+
+"""
+Versão 5.4 - Finalização da Lista de Saída
+
+Alterações principais:
+- Removido 'PAC 18 50KG' da lista DESIRED_SEQUENCE para focar apenas nos itens
+  de giro desejados. Se o PAC for importado, ele será processado corretamente
+  e aparecerá na seção 'ITENS NÃO MAPEADOS (VERIFICAR)' ao final do relatório.
+"""
+
+import re
+import os
+import unicodedata
+from pathlib import Path
+import pandas as pd
+import customtkinter as ctk
+from tkinter import filedialog, messagebox, ttk
+
+# ----------------------------------------------------------------------------------
+# PASSO 1: FUNÇÕES AUXILIARES (Inalteradas)
+# ----------------------------------------------------------------------------------
+
+def normalize_text(s: str) -> str:
+    if not isinstance(s, str): s = str(s)
+    s = unicodedata.normalize('NFD', s).encode('ascii', 'ignore').decode('utf-8').lower()
+    s = re.sub(r'[^a-z0-9\s]', '', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+def parse_number(x):
+    if pd.isna(x): return 0.0
+    if isinstance(x, (int, float)): return float(x)
+    s = str(x).strip().replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+# ----------------------------------------------------------------------------------
+# PASSO 2: DICIONÁRIO DE REGRAS (Inalterado desde v5.3)
+# ----------------------------------------------------------------------------------
+
+PRODUCT_CONVERSION_MAP = {
+    # Itens corrigidos na v5.3
+    "pac 18 50kg": ("PAC 18 50KG", "kg", 50.0),
+    "sulfato de cobre 25kg": ("SULFATO DE ALUMÍNIO", "kg", 25.0),
+    "clarificante rubi 900ml": ("CLARIFICANTE LÍQUIDO RUBI 900ML", "L", 0.9),
+    
+    # --- SÓLIDOS (KG) ---
+    "decantador e clarificante safira 1kg": ("DECANTADOR SAFIRA 1KG", "kg", 1.0),
+    "decantador e clarificante safira 2kg": ("DECANTADOR SAFIRA 2KG", "kg", 2.0),
+    "sulfato de aluminio p60 25kg": ("SULFATO DE ALUMÍNIO", "kg", 25.0),
+    "sulfato de aluminio 25kg": ("SULFATO DE ALUMÍNIO", "kg", 25.0),
+    "barrilha cristal rhofer 2kg": ("BARRILHA CRISTAL 2KG", "kg", 2.0),
+    "barrilha cristal 2kg": ("BARRILHA CRISTAL 2KG", "kg", 2.0),
+    "barrilha cristal 1kg": ("BARRILHA CRISTAL 1KG", "kg", 1.0),
+    "barrilha leve 25kg": ("BARRILHA LEVE", "kg", 25.0),
+    "barrilha densa 25kg": ("BARRILHA DENSA", "kg", 25.0),
+    "elevador de alcalinidade silver 1kg": ("ELEVADOR DE ALCALINIDADE SILVER 1KG", "kg", 1.0),
+    "elevador de alcalinidade silver 2kg": ("ELEVADOR DE ALCALINIDADE SILVER 2KG", "kg", 2.0),
+    "bicarbonato de sodio 25kg": ("BICARBONATO", "kg", 25.0),
+    "cloreto de sodio 25kg": ("BICARBONATO", "kg", 25.0),
+    "cloro ametista 1kg": ("CLORO AMETISTA 1KG", "kg", 1.0),
+    "cloro ametista 10kg": ("CLORO AMETISTA 10KG", "kg", 10.0),
+    "cloro ametista 50kg": ("CLORO AMETISTA 50KG", "kg", 50.0),
+    "cloro multiacao 1kg": ("CLORO MULTIAÇÃO 1KG", "kg", 1.0),
+    "cloro multiacao 10kg": ("CLORO MULTIAÇÃO 10KG", "kg", 10.0),
+    "multiacao 50kg": ("CLORO MULTIAÇÃO 50KG", "kg", 50.0),
+    "cloro platinum 1kg": ("CLORO PLATINUM 1KG", "kg", 1.0),
+    "cloro platinum 10kg": ("CLORO PLATINUM 10KG", "kg", 10.0),
+    "platinum 50kg": ("CLORO PLATINUM 50KG", "kg", 50.0),
+    "dicloro 56 25kg": ("DICLORO", "kg", 25.0),
+    "dicloro 60 25kg": ("DICLORO", "kg", 25.0),
+    "cloro diamante 500g": ("CLORO DIAMANTE 500G", "kg", 0.5),
+    "cloro diamante 10kg": ("CLORO DIAMANTE 10KG", "kg", 10.0),
+    "hipoca 45kg past 200g": ("HIPOCA", "kg", 45.0),
+    "hipoca 45kg": ("HIPOCA", "kg", 45.0),
+    "cloro titanium tabletes 200g": ("CLORO TITANIUM 200G", "kg", 0.2),
+    "tcl 90 past 200g 50kg": ("TCL 200G", "kg", 0.2),
+    "tcl 90 past 20g 50kg": ("TCL 20G", "kg", 0.02),
+    "sulfato de cobre 1kg": ("SULFATO DE ALUMÍNIO", "kg", 1.0),
+    
+    # --- LÍQUIDOS (L) ---
+    "algicida esmeralda 900ml": ("ALGICIDA 900ML", "L", 0.9),
+    "algicida acqua marine choque 1l": ("ALGICIDA CHOQUE 1L", "L", 1.0),
+    "algicida topazio manutencao 1l": ("ALGICIDA MANUTENÇÃO 1L", "L", 1.0),
+    "algicida esmeralda 5l": ("ALGICIDA 5L", "L", 5.0),
+    "algicida 50kg": ("ALGICIDA 50L", "L", 50.0),
+    "clarificante gel selenita 90g": ("CLARIFICANTE GEL SELENITA 90G", "L", 0.09),
+    "clarificante liquido rubi 900ml": ("CLARIFICANTE LÍQUIDO RUBI 900ML", "L", 0.9),
+    "clarificante liquido rubi 1l": ("CLARIFICANTE LÍQUIDO RUBI 1L", "L", 1.0),
+    "clarificante rubi 5l": ("CLARIFICANTE LÍQUIDO RUBI 5L", "L", 5.0),
+    "limpa bordas brilhante 1l": ("LIMPA BORDAS BRILHANTE 1L", "L", 1.0),
+    
+    # --- UNIDADES (UN) ---
+    "kit teste cloro e ph": ("KIT TESTE CLORO E PH", "un", 1),
+    "indicador de cloro 20ml": ("REAGENTE CLORO", "un", 1),
+    "reagente aquality cloro": ("REAGENTE CLORO", "un", 1),
+    "indicador de ph 20ml": ("REAGENTE PH", "un", 1),
+    "kit teste alcalinidade": ("KIT TESTE ALCALINIDADE", "un", 1),
+    "indicador solucao 1 tit 20ml": ("REAGENTE TITULANTE", "un", 1),
+    "indicador solucao 2 ind 20ml": ("REAGENTE INDICADOR", "un", 1),
+}
+
+# ----------------------------------------------------------------------------------
+# PASSO 3: LISTA DE ORDENAÇÃO (PAC 18 50KG removido daqui)
+# ----------------------------------------------------------------------------------
+DESIRED_SEQUENCE = [
+    "kg",
+    "PÓS E SÓLIDOS",
+    "DECANTADOR SAFIRA 1KG",
+    "DECANTADOR SAFIRA 2KG",
+    "SULFATO DE ALUMÍNIO",
+    "BARRILHA CRISTAL 1KG",
+    "BARRILHA CRISTAL 2KG",
+    "BARRILHA LEVE",
+    "BARRILHA DENSA",
+    "ELEVADOR DE ALCALINIDADE SILVER 1KG",
+    "ELEVADOR DE ALCALINIDADE SILVER 2KG",
+    "BICARBONATO",
+    "CLORO AMETISTA 1KG",
+    "CLORO AMETISTA 10KG",
+    "CLORO AMETISTA 50KG",
+    "CLORO MULTIAÇÃO 1KG",
+    "CLORO MULTIAÇÃO 10KG",
+    "CLORO MULTIAÇÃO 50KG",
+    "CLORO PLATINUM 1KG",
+    "CLORO PLATINUM 10KG",
+    "CLORO PLATINUM 50KG",
+    "DICLORO",
+    "CLORO DIAMANTE 500G",
+    "CLORO DIAMANTE 10KG",
+    "HIPOCA",
+    "CLORO TITANIUM 200G",
+    "TCL 200G",
+    "TCL 20G",
+    "Total (KG)",
+    "litros",
+    "LÍQUIDOS",
+    "ALGICIDA 900ML",
+    "ALGICIDA CHOQUE 1L",
+    "ALGICIDA MANUTENÇÃO 1L",
+    "ALGICIDA 5L",
+    "ALGICIDA 50L",
+    "CLARIFICANTE GEL SELENITA 90G",
+    "CLARIFICANTE LÍQUIDO RUBI 900ML",
+    "CLARIFICANTE LÍQUIDO RUBI 1L",
+    "CLARIFICANTE LÍQUIDO RUBI 5L",
+    "LIMPA BORDAS BRILHANTE 1L",
+    "Total (L)",
+    "unidade",
+    "KIT TESTE E REAGENTES",
+    "KIT TESTE CLORO E PH",
+    "REAGENTE CLORO",
+    "REAGENTE PH",
+    "KIT TESTE ALCALINIDADE",
+    "REAGENTE TITULANTE",
+    "REAGENTE INDICADOR",
+    "Total (UN)"
+]
+
+# ----------------------------------------------------------------------------------
+# PASSO 4: FUNÇÃO DE PROCESSAMENTO (Inalterada)
+# ----------------------------------------------------------------------------------
+def process_data(df: pd.DataFrame, product_col: str, qty_col: str) -> pd.DataFrame:
+    aggregated_data, unmapped_items = {}, []
+    sorted_map_keys = sorted(PRODUCT_CONVERSION_MAP.keys(), key=len, reverse=True)
+    for _, row in df.iterrows():
+        original_name, quantity = row.get(product_col), parse_number(row.get(qty_col, 0))
+        if not original_name or quantity == 0: continue
+        normalized_name, found_match = normalize_text(original_name), False
+        for map_key in sorted_map_keys:
+            if map_key in normalized_name:
+                target_name, unit, factor = PRODUCT_CONVERSION_MAP[map_key]
+                converted_qty = quantity * factor
+                if target_name in aggregated_data: aggregated_data[target_name]["quantity"] += converted_qty
+                else: aggregated_data[target_name] = {"quantity": converted_qty, "unit": unit}
+                found_match = True
+                break
+        if not found_match: unmapped_items.append({"Produto": str(original_name), "Quantidade": quantity})
+    output_rows = []; total_kg, total_l, total_un = 0, 0, 0
+    header_items = ["kg", "PÓS E SÓLIDOS", "litros", "LÍQUIDOS", "unidade", "KIT TESTE E REAGENTES"]
+    for item_name in DESIRED_SEQUENCE:
+        if item_name.startswith("Total"):
+            if "KG" in item_name: output_rows.append({"Produto": item_name, "Quantidade": total_kg, "Unidade": "kg"})
+            elif "L" in item_name: output_rows.append({"Produto": item_name, "Quantidade": total_l, "Unidade": "L"})
+            elif "UN" in item_name: output_rows.append({"Produto": item_name, "Quantidade": total_un, "Unidade": "un"})
+        elif item_name in header_items: output_rows.append({"Produto": item_name, "Quantidade": "", "Unidade": ""})
+        else:
+            data = aggregated_data.get(item_name)
+            if data:
+                qty, unit = data["quantity"], data["unit"]
+                output_rows.append({"Produto": item_name, "Quantidade": qty, "Unidade": unit})
+                if unit == "kg": total_kg += qty
+                elif unit == "L": total_l += qty
+                elif unit == "un": total_un += qty
+            else: output_rows.append({"Produto": item_name, "Quantidade": 0, "Unidade": ""})
+    if unmapped_items:
+        output_rows.append({"Produto": "ITENS NÃO MAPEADOS (VERIFICAR)", "Quantidade": "", "Unidade": ""})
+        for item in unmapped_items: output_rows.append({"Produto": item["Produto"], "Quantidade": item["Quantidade"], "Unidade": "original"})
+    return pd.DataFrame(output_rows)
+
+# ----------------------------------------------------------------------------------
+# PASSO 5: INTERFACE GRÁFICA (Título atualizado para v5.4)
+# ----------------------------------------------------------------------------------
+class QuantConverterApp:
+    def __init__(self, root):
+        self.root = root; ctk.set_appearance_mode("System"); ctk.set_default_color_theme("blue")
+        self.root.title("Parceiro de Programação - Conversor v5.4 (Lista de Saída Final)"); self.root.geometry("1000x700")
+        self.df_original, self.df_final, self.filepath = None, None, None
+        top_frame = ctk.CTkFrame(self.root); top_frame.pack(side="top", fill="x", padx=10, pady=10)
+        self.btn_import = ctk.CTkButton(top_frame, text="1. Importar Planilha", command=self.import_file); self.btn_import.pack(side="left", padx=5)
+        self.btn_process = ctk.CTkButton(top_frame, text="2. Processar Dados", command=self.process_and_show, state="disabled"); self.btn_process.pack(side="left", padx=5)
+        self.btn_save = ctk.CTkButton(top_frame, text="3. Exportar Resultado", command=self.save_file, state="disabled"); self.btn_save.pack(side="left", padx=5)
+        self.lbl_status = ctk.CTkLabel(top_frame, text="Bem-vindo! Importe a planilha de giro de estoque.", text_color="gray"); self.lbl_status.pack(side="right", padx=10)
+        mid_frame = ctk.CTkFrame(self.root); mid_frame.pack(expand=True, fill="both", padx=10, pady=0)
+        cols = ("produto", "quantidade", "unidade"); self.tree = ttk.Treeview(mid_frame, columns=cols, show="headings")
+        self.tree.heading("produto", text="Produto Final"); self.tree.heading("quantidade", text="Quantidade Convertida"); self.tree.heading("unidade", text="Unidade")
+        self.tree.column("produto", width=400, anchor="w"); self.tree.column("quantidade", width=150, anchor="center"); self.tree.column("unidade", width=100, anchor="center")
+        vsb = ctk.CTkScrollbar(mid_frame, command=self.tree.yview); self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True, pady=5); vsb.pack(side="right", fill="y", pady=5)
+
+    def import_file(self):
+        filetypes = [("Planilhas", "*.xlsx *.xls *.csv")]; path = filedialog.askopenfilename(title="Selecione a planilha", filetypes=filetypes)
+        if not path: return
+        try:
+            df = None
+            if path.endswith(('.xls', '.xlsx')): df = pd.read_excel(path)
+            elif path.endswith('.csv'):
+                encodings_to_try = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+                for encoding in encodings_to_try:
+                    try:
+                        df = pd.read_csv(path, encoding=encoding, sep=None, engine='python')
+                        break
+                    except UnicodeDecodeError: continue
+            if df is None: raise ValueError("Não foi possível ler o arquivo.")
+            self.df_original = df; self.filepath = path
+            self.lbl_status.configure(text=f"Arquivo: {os.path.basename(path)}")
+            self.btn_process.configure(state="normal"); self.btn_save.configure(state="disabled")
+            messagebox.showinfo("Sucesso", f"{len(self.df_original)} linhas carregadas.\nPronto para processar.")
+            for i in self.tree.get_children(): self.tree.delete(i)
+        except Exception as e: messagebox.showerror("Erro de Importação", f"Não foi possível ler o arquivo.\n\nDetalhes: {e}")
+
+    def detect_columns(self, df: pd.DataFrame):
+        product_col, qty_col = None, None
+        for col in df.columns:
+            c = normalize_text(col)
+            if any(k in c for k in ["produto", "servico", "nome", "descricao", "item"]):
+                if not product_col: product_col = col
+            if any(k in c for k in ["saida"]):
+                if not qty_col: qty_col = col
+        if not product_col or not qty_col: raise ValueError("Colunas 'Produto' e 'Saída' não detectadas.")
+        return product_col, qty_col
+
+    def process_and_show(self):
+        if self.df_original is None: return
+        try:
+            prod_col, qty_col = self.detect_columns(self.df_original)
+            self.df_final = process_data(self.df_original, prod_col, qty_col)
+            for i in self.tree.get_children(): self.tree.delete(i)
+            for _, r in self.df_final.iterrows():
+                qty_val = r["Quantidade"]
+                qty_str = f"{float(qty_val):.2f}" if isinstance(qty_val, (int, float)) else str(qty_val)
+                self.tree.insert("", "end", values=(r["Produto"], qty_str, r["Unidade"]))
+            self.btn_save.configure(state="normal")
+            messagebox.showinfo("Concluído", "Dados processados com sucesso!")
+        except Exception as e: messagebox.showerror("Erro no Processamento", f"Ocorreu um erro.\nDetalhes: {e}")
+
+    def save_file(self):
+        if self.df_final is None: return
+        initial_name = Path(self.filepath).stem + "_resultado.xlsx"
+        path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Planilha Excel", "*.xlsx")], initialfile=initial_name)
+        if not path: return
+        try:
+            self.df_final.to_excel(path, index=False)
+            messagebox.showinfo("Sucesso", f"Arquivo salvo em:\n{path}")
+        except Exception as e: messagebox.showerror("Erro ao Salvar", f"Não foi possível salvar o arquivo.\nErro: {e}")
+
+def main():
+    root = ctk.CTk(); app = QuantConverterApp(root); root.mainloop()
+
+if __name__ == "__main__":
+    main()
